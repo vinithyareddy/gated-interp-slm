@@ -1,0 +1,7 @@
+{
+  "step": 10,
+  "epoch": 1,
+  "metrics": {
+    "loss": 2.5
+  }
+}

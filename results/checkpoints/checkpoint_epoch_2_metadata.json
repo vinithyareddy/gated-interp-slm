@@ -1,0 +1,8 @@
+{
+  "step": 314,
+  "epoch": 2,
+  "metrics": {
+    "val_loss": 2.090441172379394,
+    "val_perplexity": 8.088482792476936
+  }
+}
