@@ -1,3 +1,28 @@
+# Utility function to build tokenizer
+def build_tokenizer(tokenizer_type: str, train_path: str, min_char_freq: int = 2, tiktoken_encoding: str = "gpt2"):
+    """
+    Build and return a tokenizer instance.
+    Args:
+        tokenizer_type: 'char' or 'tiktoken'
+        train_path: Path to training data (CSV)
+        min_char_freq: Minimum character frequency for char tokenizer
+        tiktoken_encoding: Encoding name for TikTokenTokenizer
+    Returns:
+        tokenizer: CharTokenizer or TikTokenTokenizer
+    """
+    if tokenizer_type == 'char':
+        tokenizer = CharTokenizer(min_freq=min_char_freq)
+        # Build vocab from training data
+        import pandas as pd
+        df = pd.read_csv(train_path, nrows=10000)  # Use a subset for speed
+        texts = df['text'].dropna().astype(str).tolist()
+        tokenizer.build_vocab(texts)
+        return tokenizer
+    elif tokenizer_type == 'tiktoken':
+        tokenizer = TikTokenTokenizer(encoding_name=tiktoken_encoding)
+        return tokenizer
+    else:
+        raise ValueError(f"Unknown tokenizer_type: {tokenizer_type}")
 """
 Data loading and tokenization for TinyStories dataset
 """
@@ -171,16 +196,22 @@ class TinyStoriesDataset:
         
         self.texts = df['text'].tolist()
         print(f"Loaded {len(self.texts)} samples")
-        
-        # Tokenize all texts
+
+        # Tokenize all texts, skip empty or invalid
         print("Tokenizing texts...")
         self.tokenized_texts = []
+        skipped = 0
         for text in tqdm(self.texts, desc="Tokenizing"):
-            if isinstance(text, str):
+            if isinstance(text, str) and text.strip():
                 tokens = self.tokenizer.encode(text, add_special_tokens=True)
-                self.tokenized_texts.append(tokens)
-        
-        print(f"Dataset ready with {len(self.tokenized_texts)} tokenized samples")
+                # Only keep if at least two tokens (BOS/EOS or more)
+                if len(tokens) >= 2:
+                    self.tokenized_texts.append(tokens)
+                else:
+                    skipped += 1
+            else:
+                skipped += 1
+        print(f"Dataset ready with {len(self.tokenized_texts)} tokenized samples (skipped {skipped} empty/invalid)")
     
     def __len__(self) -> int:
         return len(self.tokenized_texts)
@@ -238,89 +269,32 @@ def create_dataloaders(
     train_dataset = TinyStoriesDataset(train_path, tokenizer, seq_length, max_train_samples)
     val_dataset = TinyStoriesDataset(val_path, tokenizer, seq_length, max_val_samples)
     
-    # Create batches for training
-    print("Creating training batches...")
-    train_batches = []
-    indices = np.random.permutation(len(train_dataset))  # Shuffle training data
-    
-    for i in range(0, len(indices), batch_size):
-        batch_indices = indices[i:i + batch_size]
-        batch_inputs = []
-        batch_targets = []
-        
-        for idx in batch_indices:
-            input_ids, target_ids = train_dataset[int(idx)]
-            batch_inputs.append(input_ids)
-            batch_targets.append(target_ids)
-        
-        # Stack into batches
-        batch_inputs = mx.stack(batch_inputs)
-        batch_targets = mx.stack(batch_targets)
-        train_batches.append((batch_inputs, batch_targets))
-    
-    # Create batches for validation (no shuffling)
-    print("Creating validation batches...")
-    val_batches = []
-    
-    for i in range(0, len(val_dataset), batch_size):
-        batch_inputs = []
-        batch_targets = []
-        
-        for idx in range(i, min(i + batch_size, len(val_dataset))):
-            input_ids, target_ids = val_dataset[idx]
-            batch_inputs.append(input_ids)
-            batch_targets.append(target_ids)
-        
-        # Stack into batches
-        batch_inputs = mx.stack(batch_inputs)
-        batch_targets = mx.stack(batch_targets)
-        val_batches.append((batch_inputs, batch_targets))
-    
-    print(f"Created {len(train_batches)} training batches and {len(val_batches)} validation batches")
-    
-    return train_batches, val_batches
+    def train_batch_generator():
+        print("Creating training batches (generator)...")
+        indices = np.random.permutation(len(train_dataset))
+        for i in range(0, len(indices), batch_size):
+            batch_indices = indices[i:i + batch_size]
+            batch_inputs = []
+            batch_targets = []
+            for idx in batch_indices:
+                input_ids, target_ids = train_dataset[int(idx)]
+                batch_inputs.append(input_ids)
+                batch_targets.append(target_ids)
+            batch_inputs = mx.stack(batch_inputs)
+            batch_targets = mx.stack(batch_targets)
+            yield (batch_inputs, batch_targets)
 
+    def val_batch_generator():
+        print("Creating validation batches (generator)...")
+        for i in range(0, len(val_dataset), batch_size):
+            batch_inputs = []
+            batch_targets = []
+            for j in range(i, min(i + batch_size, len(val_dataset))):
+                input_ids, target_ids = val_dataset[j]
+                batch_inputs.append(input_ids)
+                batch_targets.append(target_ids)
+            batch_inputs = mx.stack(batch_inputs)
+            batch_targets = mx.stack(batch_targets)
+            yield (batch_inputs, batch_targets)
 
-def build_tokenizer(
-    tokenizer_type: str,
-    train_path: str,
-    min_char_freq: int = 2,
-    tiktoken_encoding: str = "gpt2",
-    max_samples_for_vocab: int = 10000
-) -> Tuple:
-    """
-    Build and return appropriate tokenizer
-    
-    Args:
-        tokenizer_type: "char" or "tiktoken"
-        train_path: Path to training data (for building vocab)
-        min_char_freq: Minimum character frequency for char tokenizer
-        tiktoken_encoding: Encoding name for tiktoken
-        max_samples_for_vocab: Max samples to use for building vocab
-        
-    Returns:
-        tokenizer: Tokenizer instance
-    """
-    if tokenizer_type == "char":
-        tokenizer = CharTokenizer(min_freq=min_char_freq)
-        
-        # Load sample of training data to build vocabulary
-        print(f"Loading {max_samples_for_vocab} samples to build vocabulary...")
-        df = pd.read_csv(train_path, nrows=max_samples_for_vocab)
-        
-        # Find text column
-        if 'text' not in df.columns:
-            text_cols = [col for col in df.columns if 'text' in col.lower() or 'story' in col.lower()]
-            if text_cols:
-                df = df.rename(columns={text_cols[0]: 'text'})
-        
-        texts = df['text'].dropna().tolist()
-        tokenizer.build_vocab(texts)
-        
-        return tokenizer
-    
-    elif tokenizer_type == "tiktoken":
-        return TikTokenTokenizer(encoding_name=tiktoken_encoding)
-    
-    else:
-        raise ValueError(f"Unknown tokenizer type: {tokenizer_type}")
+    return train_batch_generator(), val_batch_generator()

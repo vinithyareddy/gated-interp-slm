@@ -325,8 +325,19 @@ def train(
         start_step, start_epoch, _ = load_checkpoint(model, optimizer, resume_from)
         print(f"Resuming from epoch {start_epoch}, step {start_step}")
     
-    # Calculate total steps
-    steps_per_epoch = len(train_batches)
+    # Calculate total steps (for generator, estimate from dataset length and batch size)
+    if hasattr(train_batches, '__len__'):
+        steps_per_epoch = len(train_batches)
+    else:
+        # train_batches is a generator, so estimate steps from dataset
+        if hasattr(model, 'config') and hasattr(model.config, 'train_path'):
+            import pandas as pd
+            df = pd.read_csv(model.config.train_path)
+            num_samples = len(df)
+        else:
+            # Fallback: try to get from config
+            num_samples = getattr(config, 'max_train_samples', None) or 0
+        steps_per_epoch = math.ceil(num_samples / config.batch_size)
     total_steps = steps_per_epoch * config.epochs
     
     # Training state
@@ -344,13 +355,14 @@ def train(
     for epoch in range(start_epoch, config.epochs):
         print(f"Epoch {epoch + 1}/{config.epochs}")
         epoch_start_time = time.time()
-        
+
         # Training
         model.train()
         epoch_loss = 0.0
-        
-        progress_bar = tqdm(train_batches, desc=f"Training")
-        for batch_idx, (input_ids, target_ids) in enumerate(progress_bar):
+
+        progress_bar = tqdm(train_batches, desc=f"Training", total=steps_per_epoch)
+        batch_idx = 0
+        for input_ids, target_ids in train_batches:
             # Update learning rate
             lr = get_lr_schedule(
                 global_step,
@@ -359,7 +371,7 @@ def train(
                 config.learning_rate
             )
             optimizer.learning_rate = lr
-            
+
             # Training step
             loss, metrics = train_step(
                 model,
@@ -368,16 +380,18 @@ def train(
                 target_ids,
                 config.grad_clip
             )
-            
+
             epoch_loss += metrics['loss']
             global_step += 1
-            
+            batch_idx += 1
+
             # Update progress bar
             progress_bar.set_postfix({
                 'loss': f"{metrics['loss']:.4f}",
                 'ppl': f"{metrics['perplexity']:.2f}",
                 'lr': f"{lr:.2e}"
             })
+            progress_bar.update(1)
             
             # Evaluation
             if global_step % config.eval_interval == 0:
@@ -402,8 +416,8 @@ def train(
         
         # End of epoch
         epoch_time = time.time() - epoch_start_time
-        avg_epoch_loss = epoch_loss / len(train_batches)
-        
+        avg_epoch_loss = epoch_loss / max(batch_idx, 1)
+
         print(f"\nEpoch {epoch + 1} completed in {epoch_time:.2f}s")
         print(f"Average training loss: {avg_epoch_loss:.4f}")
         
